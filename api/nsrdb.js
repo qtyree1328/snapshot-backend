@@ -11,98 +11,53 @@ module.exports = async function handler(req, res) {
       return res.status(500).json({ error: "Missing NSRDB_KEY env var" });
     }
 
-    // CORS: allow your frontend to call this endpoint
-    // For first test, allow all. After it works, restrict to your domains.
+    // CORS headers
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (req.method === "OPTIONS") return res.status(200).end();
 
-    const baseParams = {
-      api_key: NSRDB_KEY,
-      wkt: `POINT(${lng} ${lat})`,
-      attributes: "ghi,dni",
-      interval: "60",
-      utc: "false",
-      leap_day: "false",
-      email: "snapshot@example.com",
-      full_name: "Snapshot Analysis",
-      affiliation: "Internal Tool",
-      reason: "Automated solar feasibility study",
-      mailing_list: "false"
-    };
+    // Use the v1 API endpoint that actually works with your key
+    const url = `https://developer.nrel.gov/api/solar/solar_resource/v1.json?api_key=${NSRDB_KEY}&lat=${lat}&lon=${lng}`;
 
-    const years = [2019, 2020, 2021, 2022, 2023];
-    const yearly = [];
-
-    for (const year of years) {
-      const params = new URLSearchParams({ ...baseParams, names: String(year) });
-      const url = `https://developer.nrel.gov/api/nsrdb/v2/solar/psm3-download.csv?${params}`;
-
-      const resp = await fetch(url);
-      if (!resp.ok) continue;
-
-      const csvText = await resp.text();
-      const lines = csvText.trim().split("\n");
-      if (lines.length < 10) continue;
-
-      // Find the header line (contains GHI)
-      let headerIdx = -1;
-      for (let i = 0; i < Math.min(15, lines.length); i++) {
-        if (lines[i].toUpperCase().includes("GHI")) {
-          headerIdx = i;
-          break;
-        }
-      }
-      if (headerIdx === -1) continue;
-
-      const headers = lines[headerIdx].split(",").map(s => s.trim().toUpperCase());
-      const ghiIdx = headers.indexOf("GHI");
-      const dniIdx = headers.indexOf("DNI");
-      if (ghiIdx === -1) continue;
-
-      let ghiSum = 0, dniSum = 0, count = 0;
-
-      for (let i = headerIdx + 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        const ghiVal = parseFloat(cols[ghiIdx]);
-        const dniVal = dniIdx >= 0 ? parseFloat(cols[dniIdx]) : NaN;
-        if (!Number.isFinite(ghiVal)) continue;
-
-        ghiSum += ghiVal;
-        if (Number.isFinite(dniVal)) dniSum += dniVal;
-        count++;
-      }
-
-      if (!count) continue;
-
-      const ghiAnnualKwh = ghiSum / 1000; // Wh/m² -> kWh/m²
-      const dniAnnualKwh = dniSum / 1000;
-
-      yearly.push({
-        year,
-        annualGhi: ghiAnnualKwh,
-        annualDni: dniAnnualKwh,
-        ghiDaily: ghiAnnualKwh / 365,
-        dniDaily: dniAnnualKwh / 365,
-        hoursRecorded: count
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      return res.status(resp.status).json({ 
+        error: "NREL API request failed", 
+        status: resp.status,
+        detail: errorText.slice(0, 200)
       });
     }
 
-    if (!yearly.length) return res.status(204).end();
+    const data = await resp.json();
+    
+    if (!data.outputs) {
+      return res.status(404).json({ error: "No solar data available for this location" });
+    }
 
-    const avgGhi = yearly.reduce((s, y) => s + y.ghiDaily, 0) / yearly.length;
-    const avgDni = yearly.reduce((s, y) => s + y.dniDaily, 0) / yearly.length;
-    const variance = yearly.reduce((s, y) => s + (y.ghiDaily - avgGhi) ** 2, 0) / yearly.length;
-
+    // Return the solar resource data
     return res.status(200).json({
-      years: yearly,
-      avgGhi,
-      avgDni,
-      stdDev: Math.sqrt(variance),
-      yearsIncluded: yearly.length
+      location: {
+        lat: parseFloat(lat),
+        lng: parseFloat(lng)
+      },
+      solar: {
+        avgGhi: data.outputs.avg_ghi?.annual || null,
+        avgDni: data.outputs.avg_dni?.annual || null,
+        avgTilt: data.outputs.avg_lat_tilt?.annual || null,
+        monthly: {
+          ghi: data.outputs.avg_ghi?.monthly || null,
+          dni: data.outputs.avg_dni?.monthly || null
+        }
+      },
+      source: "NREL Solar Resource API v1"
     });
+
   } catch (e) {
-    return res.status(500).json({ error: "Server error", detail: String(e?.message || e) });
+    return res.status(500).json({ 
+      error: "Server error", 
+      detail: String(e?.message || e) 
+    });
   }
 }
